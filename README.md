@@ -45,10 +45,12 @@ cd adguard-bootstrap-dns-benchmark
 ## Setup
 
 1. Edit the script and update these values:
-
+```bash
 [string]$AdGuardBaseUrl  = "http://127.0.0.1:3000"
 [string]$AdGuardUser     = "admin"
 [string]$AdGuardPassword = "changeme"
-
+```
+```bash
 2. Run the script manually to validate:
 .\Update-AdGuardBootstrap.ps1
+```
