@@ -1,0 +1,1 @@
+# adguard-bootstrap-dns-benchmark
