@@ -50,7 +50,7 @@ cd adguard-bootstrap-dns-benchmark
 [string]$AdGuardUser     = "admin"
 [string]$AdGuardPassword = "changeme"
 ```
-```bash
 2. Run the script manually to validate:
+```bash
 .\Update-AdGuardBootstrap.ps1
 ```
