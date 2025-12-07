@@ -38,6 +38,7 @@ This is useful for:
 ```bash
 git clone https://github.com/YOUR_USERNAME/adguard-bootstrap-dns-benchmark.git
 cd adguard-bootstrap-dns-benchmark
+```
 
 ---
 
