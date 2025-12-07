@@ -1,16 +1,15 @@
 <#
 .SYNOPSIS
-    Benchmark multiple public DNS resolvers and update AdGuard Home
-    bootstrap DNS with the fastest, most reliable servers.
+    Benchmark public DNS resolvers and update AdGuard Home bootstrap DNS
+    with the fastest, most reliable servers.
 
 .DESCRIPTION
     - Runs a "real-world" style DNS latency test against a list of
-      public resolvers.
+      public resolvers (A record queries for common domains).
     - Measures average/min/max latency and failures per resolver.
     - Selects the fastest N resolvers with zero failures.
-    - Updates AdGuard Home's dns.bootstrap_dns via its HTTP API.
-
-    Intended to be run periodically (e.g., via Task Scheduler).
+    - Updates AdGuard Home's dns.bootstrap_dns via its HTTP API
+      using HTTP Basic authentication.
 
 .PARAMETER Iterations
     Number of DNS queries per resolver.
@@ -19,31 +18,39 @@
     Number of top resolvers to write into bootstrap_dns.
 
 .PARAMETER AdGuardBaseUrl
-    Base URL for AdGuard Home Web UI / API (e.g. http://127.0.0.1:3000).
+    Base URL for AdGuard Home Web UI / API (e.g. http://127.0.0.1:8080).
 
 .PARAMETER AdGuardUser
-    AdGuard Home username. If not set, taken from $env:ADGUARD_USER.
+    AdGuard Home username.
+    If not provided, the script uses $env:ADGUARD_USER.
 
 .PARAMETER AdGuardPassword
-    AdGuard Home password. If not set, taken from $env:ADGUARD_PASS.
+    AdGuard Home password.
+    If not provided, the script uses $env:ADGUARD_PASS.
 
 .PARAMETER LogFilePath
-    Optional log file path. If omitted, logs only to console.
+    Optional log file path for logging. If omitted, logs only to console.
 
 .EXAMPLE
-    .\Update-AdGuardBootstrap.ps1
+    # With credentials in environment variables:
+    #   $env:ADGUARD_USER = "Konack"
+    #   $env:ADGUARD_PASS = "YourPassword"
+    .\Update-AdGuardBootstrap.ps1 -AdGuardBaseUrl "http://127.0.0.1:8080"
 
 .EXAMPLE
-    $env:ADGUARD_USER = "admin"
-    $env:ADGUARD_PASS = "supersecret"
-    .\Update-AdGuardBootstrap.ps1 -AdGuardBaseUrl "http://127.0.0.1:8080" -TopNBootstrap 4
+    .\Update-AdGuardBootstrap.ps1 `
+        -AdGuardBaseUrl "http://127.0.0.1:8080" `
+        -AdGuardUser "Username" `
+        -AdGuardPassword "YourPassword" `
+        -TopNBootstrap 4 `
+        -Iterations 40
 #>
 
 [CmdletBinding()]
 param(
     [int]$Iterations        = 40,
     [int]$TopNBootstrap     = 4,
-    [string]$AdGuardBaseUrl = "http://127.0.0.1:3000",
+    [string]$AdGuardBaseUrl = "http://127.0.0.1:8080",
     [string]$AdGuardUser    = $env:ADGUARD_USER,
     [string]$AdGuardPassword = $env:ADGUARD_PASS,
     [string]$LogFilePath
@@ -97,6 +104,18 @@ function Write-Log {
     }
 }
 
+# ---------- Build Basic Auth headers ----------
+function New-AdGuardHeaders {
+    param(
+        [string]$UserName,
+        [string]$Password
+    )
+    $pair   = "$UserName`:$Password"
+    $bytes  = [System.Text.Encoding]::ASCII.GetBytes($pair)
+    $base64 = [Convert]::ToBase64String($bytes)
+    return @{ Authorization = "Basic $base64" }
+}
+
 # ---------- DNS benchmark (real-world style, no jobs) ----------
 function Test-DnsResolvers {
     param(
@@ -134,7 +153,7 @@ function Test-DnsResolvers {
             }
 
             $domain = $Domains | Get-Random
-            $recordType = "A"  # keep simple and comparable
+            $recordType = "A"
 
             Write-Progress -Id 2 -ParentId 1 -Activity "Testing $name" `
                 -Status "Query $i of $Iterations ($recordType $domain)" `
@@ -155,7 +174,6 @@ function Test-DnsResolvers {
                 Write-Log "  [$name] Query $i for $domain failed: $($_.Exception.Message)"
             }
 
-            # Small jitter to simulate real usage
             Start-Sleep -Milliseconds (Get-Random -Min 50 -Max 200)
         }
 
@@ -192,24 +210,29 @@ function Test-DnsResolvers {
 function Get-AdGuardDnsConfig {
     param(
         [string]$BaseUrl,
-        [pscredential]$Credential
+        [hashtable]$Headers
     )
     $url = "$BaseUrl/control/dns_info"
     Write-Log "Fetching current AdGuard Home DNS config from $url..."
-    return Invoke-RestMethod -Uri $url -Credential $Credential -Method Get
+    return Invoke-RestMethod -Uri $url -Headers $Headers -Method Get
 }
 
 function Set-AdGuardDnsConfig {
     param(
         [string]$BaseUrl,
-        [pscredential]$Credential,
+        [hashtable]$Headers,
         [object]$Config
     )
     $url = "$BaseUrl/control/dns_config"
     Write-Log "Updating AdGuard Home DNS config at $url..."
     $json = $Config | ConvertTo-Json -Depth 10
-    Invoke-RestMethod -Uri $url -Credential $Credential -Method Post `
-        -ContentType "application/json" -Body $json | Out-Null
+
+    Invoke-RestMethod `
+        -Uri $url `
+        -Headers $Headers `
+        -Method Post `
+        -ContentType "application/json" `
+        -Body $json | Out-Null
 }
 
 # ---------- Main ----------
@@ -221,10 +244,9 @@ if (-not $AdGuardUser -or -not $AdGuardPassword) {
     exit 1
 }
 
-$sec  = ConvertTo-SecureString $AdGuardPassword -AsPlainText -Force
-$cred = New-Object System.Management.Automation.PSCredential($AdGuardUser, $sec)
+$headers = New-AdGuardHeaders -UserName $AdGuardUser -Password $AdGuardPassword
 
-# 1) Benchmark
+# 1) Benchmark resolvers
 $benchmarkResults = Test-DnsResolvers -Resolvers $Resolvers -Domains $TestDomains -Iterations $Iterations
 
 Write-Host ""
@@ -251,13 +273,13 @@ $selected | Format-Table Name, IP, AvgMs, MinMs, MaxMs -AutoSize
 
 # 3) Apply to AdGuard
 try {
-    $dnsConfig = Get-AdGuardDnsConfig -BaseUrl $AdGuardBaseUrl -Credential $cred
+    $dnsConfig = Get-AdGuardDnsConfig -BaseUrl $AdGuardBaseUrl -Headers $headers
 
     $newBootstrap = $selected.IP
     Write-Log "Updating dns.bootstrap_dns to: $($newBootstrap -join ', ')"
 
     $dnsConfig.bootstrap_dns = $newBootstrap
-    Set-AdGuardDnsConfig -BaseUrl $AdGuardBaseUrl -Credential $cred -Config $dnsConfig
+    Set-AdGuardDnsConfig -BaseUrl $AdGuardBaseUrl -Headers $headers -Config $dnsConfig
 
     Write-Log "AdGuard Home bootstrap DNS successfully updated."
 }
