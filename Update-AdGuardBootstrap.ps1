@@ -5,7 +5,7 @@
 
 .DESCRIPTION
     - Runs a "real-world" style DNS latency test against a list of
-      public resolvers (A record queries for common domains).
+      public resolvers (A or optionally mixed A/AAAA queries).
     - Measures average/min/max latency and failures per resolver.
     - Selects the fastest N resolvers with zero failures.
     - Updates AdGuard Home's dns.bootstrap_dns via its HTTP API
@@ -17,43 +17,39 @@
 .PARAMETER TopNBootstrap
     Number of top resolvers to write into bootstrap_dns.
 
+.PARAMETER MixAAAA
+    If set, randomly mix A and AAAA queries instead of A only.
+
+.PARAMETER DryRun
+    If set, do not modify AdGuard Home. Only run tests and show what would be applied.
+
 .PARAMETER AdGuardBaseUrl
-    Base URL for AdGuard Home Web UI / API (e.g. http://127.0.0.1:8080).
+    Base URL for AdGuard Home Web UI / API (for example http://127.0.0.1:8080).
 
 .PARAMETER AdGuardUser
     AdGuard Home username.
-    If not provided, the script uses $env:ADGUARD_USER.
 
 .PARAMETER AdGuardPassword
     AdGuard Home password.
-    If not provided, the script uses $env:ADGUARD_PASS.
 
 .PARAMETER LogFilePath
     Optional log file path for logging. If omitted, logs only to console.
-
-.EXAMPLE
-    # With credentials in environment variables:
-    #   $env:ADGUARD_USER = "Konack"
-    #   $env:ADGUARD_PASS = "YourPassword"
-    .\Update-AdGuardBootstrap.ps1 -AdGuardBaseUrl "http://127.0.0.1:8080"
-
-.EXAMPLE
-    .\Update-AdGuardBootstrap.ps1 `
-        -AdGuardBaseUrl "http://127.0.0.1:8080" `
-        -AdGuardUser "Username" `
-        -AdGuardPassword "YourPassword" `
-        -TopNBootstrap 4 `
-        -Iterations 40
 #>
 
 [CmdletBinding()]
 param(
     [int]$Iterations        = 40,
     [int]$TopNBootstrap     = 4,
+
+    # Configure these three for your environment before running or publishing.
     [string]$AdGuardBaseUrl = "http://127.0.0.1:8080",
-    [string]$AdGuardUser    = $env:ADGUARD_USER,
-    [string]$AdGuardPassword = $env:ADGUARD_PASS,
-    [string]$LogFilePath
+    [string]$AdGuardUser    = "Username",
+    [string]$AdGuardPassword = "Password",
+
+    [switch]$MixAAAA,
+    [switch]$DryRun,
+
+    [string]$LogFilePath    = "$PSScriptRoot\AdGuardBootstrapBenchmark.log"
 )
 
 # ---------- Resolver list (IPv4 only) ----------
@@ -122,6 +118,7 @@ function Test-DnsResolvers {
         [array]$Resolvers,
         [array]$Domains,
         [int]$Iterations,
+        [switch]$MixAAAA,
         [int]$MaxConsecutiveFailures = 5
     )
 
@@ -135,7 +132,7 @@ function Test-DnsResolvers {
         $ip   = $resolver.IP
 
         Write-Progress -Id 1 -Activity "Testing DNS resolvers" `
-            -Status "Server $idx of $total: $name ($ip)" `
+            -Status "Server $idx of $($total): $name ($ip)" `
             -PercentComplete ([int](($idx - 1) / $total * 100))
 
         Write-Log "Testing $name ($ip)..."
@@ -153,7 +150,12 @@ function Test-DnsResolvers {
             }
 
             $domain = $Domains | Get-Random
-            $recordType = "A"
+
+            if ($MixAAAA) {
+                $recordType = @("A","AAAA") | Get-Random
+            } else {
+                $recordType = "A"
+            }
 
             Write-Progress -Id 2 -ParentId 1 -Activity "Testing $name" `
                 -Status "Query $i of $Iterations ($recordType $domain)" `
@@ -171,7 +173,7 @@ function Test-DnsResolvers {
                 $sw.Stop()
                 $fail++
                 $consecutiveFailures++
-                Write-Log "  [$name] Query $i for $domain failed: $($_.Exception.Message)"
+                Write-Log "  [$name] Query $i for $domain ($recordType) failed: $($_.Exception.Message)"
             }
 
             Start-Sleep -Milliseconds (Get-Random -Min 50 -Max 200)
@@ -236,18 +238,25 @@ function Set-AdGuardDnsConfig {
 }
 
 # ---------- Main ----------
+
 Write-Log "===== Starting AdGuard Home bootstrap DNS benchmark ====="
 Write-Log "Queries per resolver: $Iterations"
 
-if (-not $AdGuardUser -or -not $AdGuardPassword) {
-    Write-Log "ERROR: AdGuard credentials not provided. Set AdGuardUser/AdGuardPassword or ADGUARD_USER/ADGUARD_PASS."
+# Check for Resolve-DnsName availability
+if (-not (Get-Command Resolve-DnsName -ErrorAction SilentlyContinue)) {
+    Write-Log "ERROR: Resolve-DnsName cmdlet is not available. This script requires Windows DNSClient tools."
+    exit 1
+}
+
+if (-not $AdGuardUser -or -not $AdGuardPassword -or $AdGuardPassword -eq "CHANGE_ME_PASSWORD") {
+    Write-Log "ERROR: Configure AdGuardBaseUrl, AdGuardUser, and AdGuardPassword at the top of the script."
     exit 1
 }
 
 $headers = New-AdGuardHeaders -UserName $AdGuardUser -Password $AdGuardPassword
 
 # 1) Benchmark resolvers
-$benchmarkResults = Test-DnsResolvers -Resolvers $Resolvers -Domains $TestDomains -Iterations $Iterations
+$benchmarkResults = Test-DnsResolvers -Resolvers $Resolvers -Domains $TestDomains -Iterations $Iterations -MixAAAA:$MixAAAA
 
 Write-Host ""
 Write-Host "Summary (real-world style latency):" -ForegroundColor Cyan
@@ -255,7 +264,7 @@ $benchmarkResults |
     Sort-Object AvgMs |
     Format-Table Name, IP, Queries, Successes, Failures, AvgMs, MinMs, MaxMs -AutoSize
 
-# 2) Filter & pick top N
+# 2) Filter and pick top N
 $eligible = $benchmarkResults |
     Where-Object { $_.Failures -eq 0 -and $_.AvgMs -ne $null } |
     Sort-Object AvgMs
@@ -271,6 +280,12 @@ Write-Host ""
 Write-Host "Selected bootstrap DNS servers:" -ForegroundColor Green
 $selected | Format-Table Name, IP, AvgMs, MinMs, MaxMs -AutoSize
 
+if ($DryRun) {
+    Write-Log "Dry run is enabled. Not updating AdGuard Home. This is what would be applied: $($selected.IP -join ', ')"
+    Write-Log "===== Finished AdGuard Home bootstrap DNS benchmark (DRY RUN) ====="
+    exit 0
+}
+
 # 3) Apply to AdGuard
 try {
     $dnsConfig = Get-AdGuardDnsConfig -BaseUrl $AdGuardBaseUrl -Headers $headers
@@ -284,7 +299,17 @@ try {
     Write-Log "AdGuard Home bootstrap DNS successfully updated."
 }
 catch {
-    Write-Log "Failed to update AdGuard Home: $($_.Exception.Message)"
+    $statusCode = $null
+    if ($_.Exception.Response) {
+        try {
+            $statusCode = $_.Exception.Response.StatusCode.value__
+        } catch {}
+    }
+    if ($statusCode) {
+        Write-Log "Failed to update AdGuard Home (HTTP $statusCode): $($_.Exception.Message)"
+    } else {
+        Write-Log "Failed to update AdGuard Home: $($_.Exception.Message)"
+    }
     exit 1
 }
 
