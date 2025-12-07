@@ -38,3 +38,16 @@ This is useful for:
 ```bash
 git clone https://github.com/YOUR_USERNAME/adguard-bootstrap-dns-benchmark.git
 cd adguard-bootstrap-dns-benchmark
+
+---
+
+## Setup
+
+1. Edit the script and update these values:
+
+[string]$AdGuardBaseUrl  = "http://127.0.0.1:3000"
+[string]$AdGuardUser     = "admin"
+[string]$AdGuardPassword = "changeme"
+
+2. Run the script manually to validate:
+.\Update-AdGuardBootstrap.ps1
